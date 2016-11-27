@@ -3,6 +3,8 @@
 
 #include <Python.h>
 
+#include "clib/msvcint.h"
+
 #include "clib/sproto.h"
 
 #define ENCODE_BUFFERSIZE 2050
@@ -42,7 +44,7 @@ delbuf(struct spbuf *spbuf) {
 
 int
 _error(const char* tagname, int index, const char* msg) {
-    PyErr_SetObject(SprotoError, PyString_FromFormat("%s @ tag[%s] index[%d]", msg, tagname, index));
+    PyErr_SetObject(SprotoError, PyUnicode_FromFormatV("%s @ tag[%s] index[%d]", msg, tagname, index));
     return -1;
 }
 
@@ -87,9 +89,9 @@ _encode(const struct sproto_arg *args) {
         return 0;
     switch (type) {
     case SPROTO_TINTEGER: {
-        if (!PyInt_Check(pyval)) 
+        if (!PyLong_FromLong(pyval))
             return _error(tagname, index, "need integer");
-        long v = PyInt_AsLong(pyval);
+        long v = PyLong_AsLong(pyval);
         long vh = v >> 31;
 		if (vh == 0 || vh == -1) {
 			*(uint32_t *)value = (uint32_t)v;
@@ -107,11 +109,11 @@ _encode(const struct sproto_arg *args) {
         return 4;
     }
 	case SPROTO_TSTRING: {
-        if (!PyString_Check(pyval)) 
+        if (!PyBytes_Check(pyval)) 
             return _error(tagname, index, "need string");
         char* str;
         size_t sz = 0;
-        PyString_AsStringAndSize(pyval, &str, &sz);
+		PyBytes_AsStringAndSize(pyval, &str, &sz);
         if (sz > length)
 			return -1;
 		memcpy(value, str, sz);
@@ -145,11 +147,11 @@ _decode(const struct sproto_arg *args) {
 
     switch (type) {
     case SPROTO_TINTEGER:
-        pyval = PyInt_FromLong(*(long*)value); break;
+        pyval = PyLong_FromLong(*(long*)value); break;
     case SPROTO_TBOOLEAN:
         pyval = (*(long*)value) == 1 ? Py_True : Py_False; break;
     case SPROTO_TSTRING:
-        pyval = PyString_FromStringAndSize(value, length); break;
+        pyval = PyBytes_FromStringAndSize(value, length); break;
     case SPROTO_TSTRUCT: {
         pyval = PyDict_New();
         int r = sproto_decode(st, value, length, _decode, pyval);
@@ -254,15 +256,15 @@ py_protocal(PyObject *self, PyObject *args) {
 
     PyArg_ParseTuple(args, "OO", &spcap, &handle);
     sp = PyCapsule_GetPointer(spcap, "pysproto");
-    if (PyString_Check(handle)) {
-        protoname = PyString_AsString(handle);
+    if (PyBytes_Check(handle)) {
+        protoname = PyBytes_AsString(handle);
         tag = sproto_prototag(sp, protoname);
         if (tag < 0) {
             _strerr(protoname);
             return NULL;
         }
-    } else if (PyInt_Check(handle)) {
-        tag = PyInt_AsLong(handle);
+    } else if (PyLong_Check(handle)) {
+        tag = PyLong_AsLong(handle);
         protoname = sproto_protoname(sp, tag);
         if (protoname == NULL) {
             _strerr("invalid proto tag");
@@ -281,7 +283,7 @@ py_protocal(PyObject *self, PyObject *args) {
     if (response)
         resp = PyCapsule_New(response, "sproto_type", NULL);
 
-    if (PyString_Check(handle)) 
+    if (PyBytes_Check(handle))
         return Py_BuildValue("(OOi)", req, resp, tag);
     else
         return Py_BuildValue("(OOs)", req, resp, protoname);
@@ -347,10 +349,76 @@ static PyMethodDef SprotoMethods[] = {
     {NULL, NULL, 0, NULL},
 };
 
+struct module_state {
+	PyObject *error;
+};
+
+#if PY_MAJOR_VERSION >= 3
+#define GETSTATE(m) ((struct module_state*)PyModule_GetState(m))
+#else
+#define GETSTATE(m) (&_state)
+static struct module_state _state;
+#endif
+
+static int myextension_traverse(PyObject *m, visitproc visit, void *arg) {
+	Py_VISIT(GETSTATE(m)->error);
+	return 0;
+}
+
+static int myextension_clear(PyObject *m) {
+	Py_CLEAR(GETSTATE(m)->error);
+	return 0;
+}
+
+
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	"pysproto",
+	NULL,
+	sizeof(struct module_state),
+	SprotoMethods,
+	NULL,
+	myextension_traverse,
+	myextension_clear,
+	NULL
+};
+
 PyMODINIT_FUNC
 initpysproto(void) {
-    PyObject *m = Py_InitModule("pysproto", SprotoMethods);
-    SprotoError = PyErr_NewException("sproto.error", NULL, NULL);
-    Py_INCREF(SprotoError);
-    PyModule_AddObject(m, "error", SprotoError);
+
+#if PY_MAJOR_VERSION >= 3
+	PyObject *module = PyModule_Create(&moduledef);
+#else
+	PyObject *module = Py_InitModule("pysproto", SprotoMethods);
+#endif
+
+	SprotoError = PyErr_NewException("sproto.error", NULL, NULL);
+	Py_INCREF(SprotoError);
+	PyModule_AddObject(module, "error", SprotoError);
+
+	return module;
+}
+
+
+//////////////////////////////////////////////////////////////////////////
+
+
+static PyObject *init_unreal_engine(void) {
+	return PyModule_Create(&moduledef);
+}
+
+
+void unreal_engine_init_py_module() {
+	PyImport_AppendInittab("pysproto", init_unreal_engine);
+	PyObject *new_unreal_engine_module = PyImport_AddModule("pysproto");
+
+	PyObject *unreal_engine_dict = PyModule_GetDict(new_unreal_engine_module);
+
+	PyMethodDef *unreal_engine_function;
+	for(unreal_engine_function = SprotoMethods; unreal_engine_function->ml_name != NULL; unreal_engine_function++)
+	{
+		PyObject *func = PyCFunction_New(unreal_engine_function, NULL);
+		PyDict_SetItemString(unreal_engine_dict, unreal_engine_function->ml_name, func);
+		Py_DECREF(func);
+	}
 }
